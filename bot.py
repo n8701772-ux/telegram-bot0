@@ -1,283 +1,247 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-import sqlite3
+import telebot
+from telebot.types import Message
+import time
+from collections import defaultdict
+from datetime import datetime
 import random
-import datetime
 
 TOKEN = "8666576626:AAHFlk3KhsRsmBnd_YjGZ_YsO7YblsA5vw4"
 
-conn = sqlite3.connect('users.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS users
-             (user_id INTEGER PRIMARY KEY, 
-              state TEXT, 
-              partner INTEGER, 
-              age INTEGER,
-              filter_age_min INTEGER DEFAULT 0,
-              filter_age_max INTEGER DEFAULT 100)''')
-conn.commit()
+bot = telebot.TeleBot(TOKEN)
 
-RULES = """
-🔞 *ПРАВИЛА ANONCHAT* 🔞
+users = {}
+waiting_list = []
+chats = {} 
+chat_messages = defaultdict(list)
 
-Здесь НЕТ:
-❌ Запретов
-❌ Цензуры
-❌ Блокировок
-❌ Модерации
+# ==============================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ==============================================
 
-✅ РАЗРЕШЕНО ВСЁ:
-• Любые темы
-• Любые выражения
-• Любой контент
-• Абсолютная анонимность
+def format_timestamp(timestamp):
+    return datetime.fromtimestamp(timestamp).strftime('%d.%m.%Y %H:%M:%S')
 
-⚠️ Единственное правило:
-Ты общаешься на свой страх и риск.
-Никто не несёт ответственности.
+def get_username(user_id):
+    return users.get(user_id, {}).get('username', str(user_id))
 
-🔥 ДОБРО ПОЖАЛОВАТЬ В СВОБОДНОЕ ОБЩЕНИЕ!
-"""
+# ==============================================
+# ОСНОВНЫЕ ФУНКЦИИ
+# ==============================================
 
-async def start(update: Update, context):
-    uid = update.effective_user.id
-    c.execute('INSERT OR IGNORE INTO users (user_id, state) VALUES (?, ?)', (uid, 'idle'))
-    conn.commit()
+def send_welcome(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or str(user_id)
     
-    keyboard = [
-        [InlineKeyboardButton("🔍 ПОИСК ( /search )", callback_data='search')],
-        [InlineKeyboardButton("📋 ПРАВИЛА", callback_data='rules')],
-        [InlineKeyboardButton("⚙️ ФИЛЬТР ВОЗРАСТА", callback_data='filter')],
-        [InlineKeyboardButton("⏹ ВЫЙТИ ( /stop )", callback_data='stop')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    users[user_id] = {
+        "state": "none",
+        "partner_id": None,
+        "chat_id": None,
+        "username": username
+    }
     
-    await update.message.reply_text(
-        "🔥 *ANONCHAT*\n\n"
+    bot.send_message(
+        message.chat.id,
+        "🔥 *ANONIM CHAT* 🔥\n\n"
         "Анонимное общение без границ.\n"
-        "Нажми /search чтобы найти собеседника.\n\n"
-        "Никаких анкет. Только возраст.\n"
-        "Никаких запретов. Всё разрешено.",
-        parse_mode='Markdown',
-        reply_markup=reply_markup
+        "Никаких запретов. Всё разрешено.\n\n"
+        "👤 *Создатель: Белый Дарон*\n\n"
+        "📌 Команды:\n"
+        "/find - Найти собеседника\n"
+        "/leave - Выйти из чата\n"
+        "/help - Помощь",
+        parse_mode='Markdown'
     )
 
-async def button_handler(update: Update, context):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    
-    if query.data == 'search':
-        await find_partner(query, context)
-    elif query.data == 'rules':
-        await show_rules(query)
-    elif query.data == 'filter':
-        await show_filter_menu(query)
-    elif query.data.startswith('filter_'):
-        parts = query.data.split('_')
-        if parts[1] == 'min':
-            c.execute('UPDATE users SET filter_age_min = ? WHERE user_id = ?', (int(parts[2]), uid))
-            conn.commit()
-            await query.edit_message_text(f"✅ Минимальный возраст: {parts[2]}")
-        elif parts[1] == 'max':
-            c.execute('UPDATE users SET filter_age_max = ? WHERE user_id = ?', (int(parts[2]), uid))
-            conn.commit()
-            await query.edit_message_text(f"✅ Максимальный возраст: {parts[2]}")
-        await show_filter_menu(query)
-    elif query.data == 'stop':
-        await stop_command(update, context)
-    elif query.data.startswith('block_'):
-        blocker = uid
-        blocked = int(query.data.split('_')[1])
-        c.execute('UPDATE users SET state = "idle", partner = NULL WHERE user_id = ?', (blocker,))
-        c.execute('UPDATE users SET state = "idle", partner = NULL WHERE user_id = ?', (blocked,))
-        conn.commit()
-        await query.edit_message_text("⛔ Собеседник заблокирован.")
-        await context.bot.send_message(blocked, "⛔ Собеседник завершил общение.")
-
-async def show_rules(query):
-    await query.edit_message_text(RULES, parse_mode='Markdown')
-
-async def show_filter_menu(query):
-    uid = query.from_user.id
-    c.execute('SELECT filter_age_min, filter_age_max FROM users WHERE user_id = ?', (uid,))
-    min_age, max_age = c.fetchone()
-    
-    keyboard = [
-        [InlineKeyboardButton(f"🔽 Мин возраст: {min_age}", callback_data='noop')],
-        [InlineKeyboardButton("16", callback_data='filter_min_16'), InlineKeyboardButton("18", callback_data='filter_min_18'), InlineKeyboardButton("21", callback_data='filter_min_21')],
-        [InlineKeyboardButton(f"🔼 Макс возраст: {max_age}", callback_data='noop')],
-        [InlineKeyboardButton("25", callback_data='filter_max_25'), InlineKeyboardButton("35", callback_data='filter_max_35'), InlineKeyboardButton("50", callback_data='filter_max_50')],
-        [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "⚙️ *ФИЛЬТР ВОЗРАСТА*\n\n"
-        f"Текущий фильтр: {min_age}–{max_age} лет\n\n"
-        "Выбери диапазон возрастов для поиска:",
-        parse_mode='Markdown',
-        reply_markup=reply_markup
+def show_help(message):
+    bot.send_message(
+        message.chat.id,
+        "📋 *Команды ANONIM CHAT:*\n\n"
+        "/find - Найти собеседника\n"
+        "/leave - Выйти из чата\n"
+        "/help - Помощь\n\n"
+        "💬 Всё анонимно. Без регистрации.\n"
+        "🔞 Всё разрешено. Без цензуры.\n\n"
+        "👤 Создатель: Белый Дарон",
+        parse_mode='Markdown'
     )
 
-async def find_partner(query, context):
-    uid = query.from_user.id
-    c.execute('SELECT state, partner FROM users WHERE user_id = ?', (uid,))
-    row = c.fetchone()
+def find_partner(message):
+    user_id = message.from_user.id
     
-    if row and row[0] == 'chat':
-        await query.edit_message_text("⚠️ Ты уже в чате. /stop чтобы выйти.")
+    if user_id not in users:
+        send_welcome(message)
         return
     
-    # Проверка возраста
-    c.execute('SELECT age FROM users WHERE user_id = ?', (uid,))
-    age_data = c.fetchone()
-    if not age_data or not age_data[0]:
-        await query.edit_message_text(
-            "📝 *Укажи свой возраст*\n\n"
-            "Просто отправь число (например 25):",
-            parse_mode='Markdown'
-        )
+    if users[user_id]["state"] != "none":
+        bot.send_message(message.chat.id, "❌ Ты уже в чате или в поиске")
         return
     
-    # Фильтр
-    c.execute('SELECT filter_age_min, filter_age_max FROM users WHERE user_id = ?', (uid,))
-    min_age, max_age = c.fetchone()
+    users[user_id]["state"] = "waiting"
+    waiting_list.append(user_id)
     
-    # Поиск с фильтром
-    c.execute('''SELECT user_id FROM users 
-                 WHERE state = "search" 
-                 AND user_id != ? 
-                 AND age IS NOT NULL
-                 AND age >= ? AND age <= ?''', (uid, min_age, max_age))
-    seekers = c.fetchall()
+    bot.send_message(message.chat.id, "🔍 Ищем собеседника...")
+    try_find_pair()
+
+def try_find_pair():
+    while len(waiting_list) >= 2:
+        user1 = waiting_list.pop(0)
+        user2 = waiting_list.pop(0)
+        
+        if users[user1]["state"] != "waiting" or users[user2]["state"] != "waiting":
+            continue
+        
+        chat_id = f"{user1}_{user2}_{int(time.time())}"
+        chats[chat_id] = {
+            "user1": user1,
+            "user2": user2,
+            "created_at": time.time()
+        }
+
+        users[user1].update({"state": "chatting", "partner_id": user2, "chat_id": chat_id})
+        users[user2].update({"state": "chatting", "partner_id": user1, "chat_id": chat_id})
+
+        bot.send_message(user1, "💬 *Собеседник найден!*\nНачинайте общение.", parse_mode='Markdown')
+        bot.send_message(user2, "💬 *Собеседник найден!*\nНачинайте общение.", parse_mode='Markdown')
+
+def leave_chat(message):
+    user_id = message.from_user.id
     
-    if seekers:
-        partner = random.choice(seekers)[0]
-        c.execute('UPDATE users SET state = "chat", partner = ? WHERE user_id = ?', (partner, uid))
-        c.execute('UPDATE users SET state = "chat", partner = ? WHERE user_id = ?', (uid, partner))
-        conn.commit()
-        
-        c.execute('SELECT age FROM users WHERE user_id = ?', (partner,))
-        pdata = c.fetchone()
-        
-        await context.bot.send_message(
-            partner,
-            "🔗 *СОБЕСЕДНИК НАЙДЕН!*\n\n"
-            f"🎂 Возраст: {pdata[0] if pdata[0] else '?'} лет\n\n"
-            "💬 Пиши анонимно! Всё разрешено.\n"
-            "/stop — выйти\n"
-            "/block — заблокировать"
-        )
-        await query.edit_message_text(
-            "🔗 *СОБЕСЕДНИК НАЙДЕН!*\n\n"
-            f"🎂 Возраст: {pdata[0] if pdata[0] else '?'} лет\n\n"
-            "💬 Пиши анонимно! Всё разрешено.\n"
-            "/stop — выйти\n"
-            "/block — заблокировать",
-            parse_mode='Markdown'
-        )
+    if user_id not in users or users[user_id]["state"] == "none":
+        bot.send_message(user_id, "❌ Ты не в чате")
+        return
+    
+    if users[user_id]["state"] == "waiting":
+        if user_id in waiting_list:
+            waiting_list.remove(user_id)
+        users[user_id]["state"] = "none"
+        bot.send_message(user_id, "🔎 Поиск остановлен")
+        return
+
+    partner_id = users[user_id]["partner_id"]
+    users[user_id]["state"] = "none"
+    users[user_id]["partner_id"] = None
+    users[user_id]["chat_id"] = None
+    
+    bot.send_message(user_id, "✅ Ты вышел из чата")
+
+    if partner_id in users and users[partner_id]["state"] == "chatting":
+        bot.send_message(partner_id, "❌ Собеседник покинул чат")
+        users[partner_id]["state"] = "none"
+        users[partner_id]["partner_id"] = None
+        users[partner_id]["chat_id"] = None
+
+def forward_message(message):
+    user_id = message.from_user.id
+    chat_info = users[user_id]
+    
+    if chat_info["state"] != "chatting" or chat_info["partner_id"] not in users:
+        bot.send_message(user_id, "❌ Собеседник покинул чат")
+        users[user_id]["state"] = "none"
+        return
+    
+    partner_id = chat_info["partner_id"]
+    chat_id = chat_info["chat_id"]
+
+    # Сохраняем в историю
+    if message.content_type == 'text':
+        chat_messages[chat_id].append({
+            "sender": user_id,
+            "type": "text",
+            "content": message.text,
+            "timestamp": time.time()
+        })
     else:
-        c.execute('UPDATE users SET state = "search", partner = NULL WHERE user_id = ?', (uid,))
-        conn.commit()
-        await query.edit_message_text(
-            "⏳ *ИЩЕМ СОБЕСЕДНИКА...*\n\n"
-            "Как только кто-то появится — соединим.\n"
-            "/stop чтобы отменить поиск.",
-            parse_mode='Markdown'
-        )
-
-async def set_age(update: Update, context):
-    uid = update.effective_user.id
-    try:
-        age = int(update.message.text.strip())
-        if 13 <= age <= 100:
-            c.execute('UPDATE users SET age = ? WHERE user_id = ?', (age, uid))
-            conn.commit()
-            await update.message.reply_text(f"✅ Возраст сохранён: {age}\nТеперь используй /search для поиска!")
+        file_id = None
+        if message.content_type == 'photo':
+            file_id = message.photo[-1].file_id
+        elif message.content_type == 'video':
+            file_id = message.video.file_id
+        elif message.content_type == 'document':
+            file_id = message.document.file_id
+        elif message.content_type == 'audio':
+            file_id = message.audio.file_id
+        elif message.content_type == 'voice':
+            file_id = message.voice.file_id
+        elif message.content_type == 'sticker':
+            file_id = message.sticker.file_id
         else:
-            await update.message.reply_text("❌ Введи возраст от 13 до 100.")
-    except ValueError:
-        await update.message.reply_text("❌ Отправь число, например: 25")
+            return
+        
+        chat_messages[chat_id].append({
+            "sender": user_id,
+            "type": message.content_type,
+            "content": file_id,
+            "timestamp": time.time()
+        })
 
-async def search_command(update: Update, context):
-    uid = update.effective_user.id
-    c.execute('INSERT OR IGNORE INTO users (user_id, state) VALUES (?, ?)', (uid, 'idle'))
-    conn.commit()
+    # Пересылаем собеседнику
+    try:
+        if message.content_type == 'text':
+            bot.send_message(partner_id, message.text)
+        elif message.content_type == 'photo':
+            bot.send_photo(partner_id, message.photo[-1].file_id)
+        elif message.content_type == 'video':
+            bot.send_video(partner_id, message.video.file_id)
+        elif message.content_type == 'document':
+            bot.send_document(partner_id, message.document.file_id)
+        elif message.content_type == 'audio':
+            bot.send_audio(partner_id, message.audio.file_id)
+        elif message.content_type == 'voice':
+            bot.send_voice(partner_id, message.voice.file_id)
+        elif message.content_type == 'sticker':
+            bot.send_sticker(partner_id, message.sticker.file_id)
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        bot.send_message(user_id, "❌ Собеседник покинул чат")
+        users[user_id]["state"] = "none"
+        users[partner_id]["state"] = "none"
+
+# ==============================================
+# ОБРАБОТЧИКИ СООБЩЕНИЙ
+# ==============================================
+
+@bot.message_handler(commands=['start', 'help', 'find', 'leave'])
+def handle_commands(message):
+    command = message.text.split()[0].lower()
     
-    c.execute('SELECT state, partner FROM users WHERE user_id = ?', (uid,))
-    row = c.fetchone()
+    if command == '/start':
+        send_welcome(message)
+    elif command == '/help':
+        show_help(message)
+    elif command == '/find':
+        find_partner(message)
+    elif command == '/leave':
+        leave_chat(message)
+
+@bot.message_handler(content_types=['text'])
+def handle_text(message):
+    user_id = message.from_user.id
     
-    if row and row[0] == 'chat':
-        await update.message.reply_text("⚠️ Ты уже в чате. /stop чтобы выйти.")
+    if user_id not in users:
+        send_welcome(message)
         return
     
-    # Имитация нажатия кнопки "Поиск"
-    query = type('obj', (object,), {'from_user': update.effective_user, 'edit_message_text': lambda self, text, **kwargs: None, 'message': update.message})()
-    await find_partner(query, context)
-
-async def stop_command(update: Update, context):
-    uid = update.effective_user.id
-    c.execute('SELECT partner FROM users WHERE user_id = ?', (uid,))
-    row = c.fetchone()
-    
-    if row and row[0]:
-        partner = row[0]
-        c.execute('UPDATE users SET state = "idle", partner = NULL WHERE user_id = ?', (uid,))
-        c.execute('UPDATE users SET state = "idle", partner = NULL WHERE user_id = ?', (partner,))
-        conn.commit()
-        await context.bot.send_message(partner, "👋 Собеседник покинул чат.")
-        await update.message.reply_text("👋 Ты вышел из чата.")
-    else:
-        c.execute('UPDATE users SET state = "idle", partner = NULL WHERE user_id = ?', (uid,))
-        conn.commit()
-        await update.message.reply_text("✅ Готово. /search чтобы найти кого-то.")
-
-async def block_command(update: Update, context):
-    uid = update.effective_user.id
-    c.execute('SELECT partner FROM users WHERE user_id = ?', (uid,))
-    row = c.fetchone()
-    
-    if row and row[0]:
-        partner = row[0]
-        c.execute('UPDATE users SET state = "idle", partner = NULL WHERE user_id = ?', (uid,))
-        c.execute('UPDATE users SET state = "idle", partner = NULL WHERE user_id = ?', (partner,))
-        conn.commit()
-        await context.bot.send_message(partner, "⛔ Собеседник завершил общение.")
-        await update.message.reply_text("⛔ Собеседник заблокирован.")
-    else:
-        await update.message.reply_text("❌ Ты не в чате.")
-
-async def relay(update: Update, context):
-    uid = update.effective_user.id
-    text = update.message.text
-    
-    if not text or text.startswith('/'):
+    if users[user_id]["state"] != "chatting":
+        bot.send_message(user_id, "ℹ️ Используй /find для поиска собеседника")
         return
     
-    # Если число — сохраняем возраст
-    if text.isdigit() and 13 <= int(text) <= 100:
-        await set_age(update, context)
+    forward_message(message)
+
+@bot.message_handler(content_types=['photo', 'video', 'document', 'audio', 'voice', 'sticker'])
+def handle_media(message):
+    user_id = message.from_user.id
+    
+    if user_id not in users or users[user_id]["state"] != "chatting":
         return
     
-    c.execute('SELECT state, partner FROM users WHERE user_id = ?', (uid,))
-    row = c.fetchone()
-    
-    if row and row[0] == 'chat' and row[1]:
-        await context.bot.send_message(row[1], f"💬 {text}")
+    forward_message(message)
 
-def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('search', search_command))
-    app.add_handler(CommandHandler('stop', stop_command))
-    app.add_handler(CommandHandler('block', block_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, relay))
-    
-    print('🔥 ANONCHAT БОТ ЗАПУЩЕН! ВСЁ РАЗРЕШЕНО! 🔥')
-    print(f'📅 {datetime.datetime.now()}')
-    app.run_polling()
+# ==============================================
+# ЗАПУСК БОТА
+# ==============================================
 
 if __name__ == '__main__':
-    main()
+    print("🔥 ANONIM CHAT ЗАПУЩЕН! 🔥")
+    print("👤 Создатель: Белый Дарон")
+    print("📅", datetime.now())
+    bot.infinity_polling()
